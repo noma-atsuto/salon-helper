@@ -191,3 +191,5 @@ details.post .body { white-space: pre-wrap; font-size: 13px; color: var(--ink-2)
 code { background: var(--surface-2); border-radius: 6px; padding: 1px 5px; font-size: 13px; overflow-wrap: anywhere; }
 ol.steps { padding-left: 20px; margin: 6px 0; }
 ol.steps li { margin-bottom: 4px; }
+label.check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin-bottom: 6px; }
+label.check input { width: 18px; height: 18px; margin-top: 1px; flex-shrink: 0; }

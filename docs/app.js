@@ -1,7 +1,7 @@
 // サロン助手：レポートのランキング・キーワード・スタイル文・ブログ文
 import { pageItems, parseReport, reportSummary } from "./report.js";
 import { scoreKeywords, keywordSources } from "./keywords.js";
-import { makeStyle, makeBlog, testKey, imageBlock, checkNg } from "./ai.js";
+import { makeStyle, makeBlog, testKey, imageBlock, checkNg, stylePrompt, blogPrompt, parseStyle, parseBlog, AI_APPS } from "./ai.js";
 
 const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/";
 const $ = (s, el = document) => el.querySelector(s);
@@ -30,6 +30,9 @@ const state = {
   blogLen: store.get("blogLen", "normal"),
   busy: false,
   photo: { style: null, blog: null },
+  aiApp: store.get("aiApp", "chatgpt"),
+  withPhoto: { style: false, blog: false },
+  withImage: store.get("withImage", false),
 };
 
 function toast(msg) {
@@ -291,11 +294,61 @@ function staffOptions(sel) {
     `<option value="${esc(s.id)}" ${s.id === sel ? "selected" : ""}>${esc(s.name)}</option>`).join("");
 }
 
-function photoField(kind) {
+// 「お願い文をコピー → AIアプリに貼る → 答えを貼り戻す」の操作欄
+function aiPanel(kind) {
+  const app = AI_APPS.find((a) => a.id === state.aiApp) || AI_APPS[0];
+  const hasKey = !!store.get("apiKey", "");
   const ph = state.photo[kind];
-  return `<label class="field"><span>写真（任意。あると髪型に合った文になります）</span>
-    <input type="file" accept="image/*" data-photo="${kind}">
-    ${ph ? `<img class="photo-prev" src="${ph.url}" alt="">` : ""}</label>`;
+  return `
+    <div class="card">
+      <h3>① お願い文をコピーして、AIアプリに貼り付け</h3>
+      <div class="seg" style="margin:6px 0 10px;padding:0">${AI_APPS.map((a) =>
+        `<button data-aiapp="${a.id}" class="${a.id === app.id ? "on" : ""}">${a.name}</button>`).join("")}</div>
+      <label class="check"><input type="checkbox" data-withphoto="${kind}" ${state.withPhoto[kind] ? "checked" : ""}> 写真も一緒に送る（AIアプリ側で写真を添付してください）</label>
+      ${kind === "blog" ? `<label class="check"><input type="checkbox" id="withImage" ${state.withImage ? "checked" : ""}> 記事に添えるイラスト画像もお願いする（画像を作れるAIのみ）</label>` : ""}
+      <button class="btn primary block" data-act="prompt" data-kind="${kind}" style="margin-top:8px">お願い文をコピーして ${esc(app.name)} を開く</button>
+      <div class="row end" style="margin-top:6px"><button class="btn sm" data-act="promptOnly" data-kind="${kind}">お願い文をコピーするだけ</button></div>
+      <p class="small muted">お客様の名前・電話番号などは書かないでください（無料版のAIは入力が学習に使われる場合があります）。</p>
+      <h3 style="margin-top:14px">② AIの答えを、ここに貼り付け</h3>
+      <textarea id="paste-${kind}" placeholder="AIの答えを全部コピーして貼り付け"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" data-act="pasteClip" data-kind="${kind}">コピーした答えを貼り付け</button>
+        <button class="btn sm primary" data-act="pasteIn" data-kind="${kind}">読み取る</button>
+      </div>
+      ${hasKey ? `
+        <h3 style="margin-top:14px">（有料）Claude で1タップ作成</h3>
+        <label class="field"><span class="small">写真（任意）</span>
+          <input type="file" accept="image/*" data-photo="${kind}">
+          ${ph ? `<img class="photo-prev" src="${ph.url}" alt="">` : ""}</label>
+        <button class="btn block" data-act="${kind === "style" ? "makeStyle" : "makeBlog"}" ${state.busy ? "disabled" : ""}>
+          ${state.busy === kind ? `<span class="spinner"></span>作っています…（30秒ほど）` : "Claude で直接作る（API・有料）"}</button>` : ""}
+    </div>`;
+}
+
+function promptFor(kind) {
+  if (kind === "style") {
+    const staff = staffList().find((s) => s.id === $("#styleStaff")?.value) || null;
+    return stylePrompt({ salon: salonName(), staff, keywords: state.selKw, memo: $("#styleMemo")?.value || "", withPhoto: state.withPhoto.style });
+  }
+  return blogPrompt({ salon: salonName(), staff: currentStaff(), keywords: state.selKw, memo: $("#blogMemo")?.value || "",
+    length: state.blogLen, withPhoto: state.withPhoto.blog, withImage: state.withImage });
+}
+
+function takeAnswer(kind, text) {
+  if (kind === "style") {
+    const o = parseStyle(text);
+    if (!o) return toast("読み取れませんでした。【スタイル名】などの見出しごと貼り付けてください");
+    state.styleOut = o;
+    store.set("styleOut", o);
+  } else {
+    const o = parseBlog(text);
+    if (!o) return toast("読み取れませんでした。AIの答えを全部貼り付けてください");
+    state.blogOut[currentStaff().id] = o;
+    store.set("blogOut", state.blogOut);
+  }
+  renders[state.view]();
+  toast("読み取りました");
+  document.querySelector(`#view-${kind} h2.done`)?.scrollIntoView({ behavior: "smooth" });
 }
 
 function renderStyle() {
@@ -304,18 +357,16 @@ function renderStyle() {
   const ng = o ? checkNg([o.styleName, o.comment, o.menu].join("\n")) : [];
   el.innerHTML = `
     <h2>スタイル掲載の文を作る</h2>
-    <p class="small muted">サロンボードの「スタイル掲載」に入れる文章の案を作ります。できた文はコピーして貼り付けてください。</p>
+    <p class="small muted">サロンボードの「スタイル掲載」に入れる文章の案を、ChatGPT などの AI に作ってもらうためのお願い文を用意します。</p>
     ${selBar("style")}
     <div class="card">
       <label class="field"><span>スタイリスト</span><select id="styleStaff">${staffOptions(state.staffId)}</select></label>
       <label class="field"><span>どんな髪型？（メモ）</span>
         <textarea id="styleMemo" placeholder="例：黒髪のセンターパート。ツイスパで動きを出した。学生さん向け">${esc(store.get("styleMemo", ""))}</textarea></label>
-      ${photoField("style")}
-      <button class="btn primary block" data-act="makeStyle" ${state.busy ? "disabled" : ""}>
-        ${state.busy === "style" ? `<span class="spinner"></span>作っています…（20〜40秒）` : "AI で文章を作る"}</button>
     </div>
+    ${aiPanel("style")}
     ${o ? `
-      <h2>できあがり</h2>
+      <h2 class="done">できあがり</h2>
       ${ng.length ? `<div class="ng">⚠️ 注意が必要かもしれない言い方があります：${ng.map((h) => `「${esc(h.word)}」（${esc(h.why)}）`).join("、")}</div>` : ""}
       ${outField("スタイル名", o.styleName, 30, "styleName")}
       ${outField("スタイリストコメント", o.comment, 120, "comment")}
@@ -349,7 +400,7 @@ function renderBlog() {
     <div class="card">
       <h3>${esc(s.name)}${s.role ? `<span class="muted small">　${esc(s.role)}</span>` : ""}</h3>
       ${s.catch ? `<p class="small muted" style="margin:0 0 6px">${esc(s.catch)}</p>` : ""}
-      <p class="small muted" style="margin:0">これまでの記事 ${fmt(s.total)}件。このうち新しい ${Math.min(5, s.posts.length)}件をお手本にします。</p>
+      <p class="small muted" style="margin:0">これまでの記事 ${fmt(s.total)}件。このうち新しい ${Math.min(4, s.posts.length)}件をお手本としてお願い文に入れます。</p>
       <details class="post"><summary class="small">保存してある記事を見る ▾</summary>
         ${s.posts.map((p) => `<details class="post"><summary>${esc(p.date)}　${esc(p.title)}</summary><div class="body">${esc(p.body)}</div></details>`).join("")}
       </details>
@@ -360,12 +411,10 @@ function renderBlog() {
         <textarea id="blogMemo" placeholder="例：秋におすすめのルーズショート。セットが簡単なことを伝えたい">${esc(store.get("blogMemo", ""))}</textarea></label>
       <div class="field"><span class="small" style="font-weight:600">長さ</span>
         <div class="seg" style="margin:4px 0 12px;padding:0">${lens.map(([k, l]) => `<button data-blen="${k}" class="${k === state.blogLen ? "on" : ""}">${l}</button>`).join("")}</div></div>
-      ${photoField("blog")}
-      <button class="btn primary block" data-act="makeBlog" ${state.busy ? "disabled" : ""}>
-        ${state.busy === "blog" ? `<span class="spinner"></span>作っています…（30〜60秒）` : `${esc(s.name)}さんの書き方で作る`}</button>
     </div>
+    ${aiPanel("blog")}
     ${o ? `
-      <h2>できあがり</h2>
+      <h2 class="done">できあがり</h2>
       ${ng.length ? `<div class="ng">⚠️ 注意が必要かもしれない言い方があります：${ng.map((h) => `「${esc(h.word)}」（${esc(h.why)}）`).join("、")}</div>` : ""}
       ${outField("題名", o.title, 30, "blogTitle")}
       ${outField("本文", o.body, 0, "blogBody")}
@@ -382,9 +431,13 @@ function renderSet() {
   const links = [["キーワードを開く", "?tab=kw"], ["スタイル作成を開く", "?tab=style"], ["ブログ作成を開く", "?tab=blog"]]
     .concat(staffList().map((s) => [`${s.name}さんのブログ作成`, `?tab=blog&staff=${s.id}`]));
   el.innerHTML = `
-    <h2>AI（Claude）の API キー</h2>
+    <h2>文章づくりに使うAI</h2>
+    <div class="card note small">
+      ふだんは、スタイル・ブログタブの「お願い文をコピー」から、ChatGPT・Gemini・Copilot・Claude の<b>無料版</b>に貼り付けて使えます（費用はかかりません。1日に使える回数には上限があります）。
+    </div>
+    <h2>（任意・有料）Claude で1タップ作成</h2>
     <div class="card">
-      <p class="small" style="margin-top:0">文章づくりに使う「合言葉」です。<b>この iPhone の中だけ</b>に保存され、Anthropic 社（Claude の会社）以外には送りません。</p>
+      <p class="small" style="margin-top:0">コピー・貼り付けを省きたい人だけ設定します。API キーは「合言葉」のようなもので、<b>この iPhone の中だけ</b>に保存され、Anthropic 社（Claude の会社）以外には送りません。料金はキーの持ち主に請求されます。</p>
       <label class="field"><span>API キー ${key ? `<span class="muted">（保存済み：…${esc(key.slice(-4))}）</span>` : ""}</span>
         <input type="password" id="apiKey" placeholder="sk-ant- から始まる文字" autocomplete="off"></label>
       <div class="row">
@@ -476,6 +529,7 @@ document.addEventListener("click", async (ev) => {
   }
   if (d.unsel) { setKw(state.selKw.filter((w) => w !== d.unsel)); return renders[state.view](); }
   if (d.staff) { state.staffId = d.staff; store.set("staff", d.staff); return renderBlog(); }
+  if (d.aiapp) { state.aiApp = d.aiapp; store.set("aiApp", d.aiapp); return renders[state.view](); }
   if (d.blen) { state.blogLen = d.blen; store.set("blogLen", d.blen); return renderBlog(); }
   if (d.tag) return copy(d.tag, `「${d.tag}」をコピーしました`);
   if (d.copylink) return copy(d.copylink, "アドレスをコピーしました");
@@ -496,6 +550,30 @@ document.addEventListener("click", async (ev) => {
     case "kwAdd": {
       const inp = $("#kwAdd-" + d.where);
       if (inp.value.trim()) { setKw([...state.selKw, ...inp.value.split(/[、,\s]+/)]); renders[state.view](); }
+      break;
+    }
+    case "prompt": {
+      // iPhone では「コピー」と「アプリを開く」をタップと同時に行わないと止められるため、待たずに続けて実行する
+      const text = promptFor(d.kind);
+      const app = AI_APPS.find((a) => a.id === state.aiApp) || AI_APPS[0];
+      navigator.clipboard?.writeText(text).catch(() => {});
+      window.open(app.url, "_blank");
+      toast("お願い文をコピーしました。AIアプリで貼り付けて送ってください");
+      break;
+    }
+    case "promptOnly": copy(promptFor(d.kind), "お願い文をコピーしました"); break;
+    case "pasteClip": {
+      try {
+        const t = await navigator.clipboard.readText();
+        $("#paste-" + d.kind).value = t;
+        if (t.trim()) takeAnswer(d.kind, t);
+      } catch { toast("貼り付けできませんでした。下の欄を長押しして「ペースト」してください"); }
+      break;
+    }
+    case "pasteIn": {
+      const t = $("#paste-" + d.kind).value;
+      if (!t.trim()) { toast("AIの答えを貼り付けてください"); break; }
+      takeAnswer(d.kind, t);
       break;
     }
     case "makeStyle": run("style"); break;
@@ -527,6 +605,8 @@ document.addEventListener("change", async (ev) => {
   const t = ev.target;
   if (t.id === "pdfInput" && t.files[0]) { await importPdf(t.files[0]); t.value = ""; }
   if (t.id === "issueSel") { state.issue = t.value; renderAll(); }
+  if (t.dataset.withphoto) { state.withPhoto[t.dataset.withphoto] = t.checked; }
+  if (t.id === "withImage") { state.withImage = t.checked; store.set("withImage", t.checked); }
   if (t.id === "styleStaff") { state.staffId = t.value || state.staffId; if (t.value) store.set("staff", t.value); }
   if (t.dataset.photo && t.files[0]) {
     const f = t.files[0];

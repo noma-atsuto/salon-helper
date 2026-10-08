@@ -1,5 +1,5 @@
 // 電波が弱いときも前回の画面を開けるようにするための仕組み（まずネット、だめなら保存済み）
-const CACHE = "salon-v1";
+const CACHE = "salon-v2";
 const SHELL = ["./", "index.html", "style.css", "app.js", "report.js", "keywords.js", "ai.js", "icon-180.png", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
