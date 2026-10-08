@@ -86,10 +86,6 @@ export function keywordSources(report, blogs, rakko) {
     if (report.bookmarkStyles?.length) {
       out.push({ label: "ブックマーク", items: report.bookmarkStyles.map((s) => ({ text: s.name, value: s.count })) });
     }
-    if (report.coupons?.rows?.length) {
-      // クーポン名は売り文句が多いので、髪型・メニューの言葉だけ拾う
-      out.push({ label: "クーポン予約", dictOnly: true, items: report.coupons.rows.map((c) => ({ text: c.name, value: c.v[c.v.length - 1] })) });
-    }
   }
   if (blogs?.staff?.length) {
     const titles = blogs.staff.flatMap((s) => s.posts.map((p) => ({ text: p.title, value: 1 })));

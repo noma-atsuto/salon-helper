@@ -1,10 +1,9 @@
 // レポートを「合言葉で鍵をかけて」全員に配る部分。
 // 公開の保管場所（GitHub）には、鍵のかかった読めないデータだけを置く。鍵を開けるのは各端末の中だけ。
-//   report-owner.enc.json … 全部入り（売上・来店数・客単価も）→ オーナー用の合言葉で開く
-//   report-staff.enc.json … 売上などを除いたもの（ランキング・キーワード用）→ スタッフ用の合言葉で開く
+//   report.enc.json … 言葉のランキング（スタイル名と閲覧数・ブックマーク数）だけ。売上・予約数は入れない
 
 export const REPO = "noma-atsuto/salon-helper"; // 保存先（持ち主/保管場所の名前）
-export const FILES = { owner: "docs/data/report-owner.enc.json", staff: "docs/data/report-staff.enc.json" };
+export const FILE = "docs/data/report.enc.json";
 const ITER = 310000; // 合言葉から鍵を作るときの繰り返し回数（多いほど総当たりに強い）
 
 const enc = new TextEncoder();
@@ -43,17 +42,10 @@ export async function unlock(box, pass) {
   }
 }
 
-// スタッフ向け：売上・来店数・客単価（月ごとの集計）を取り除く
-export function staffView(report) {
-  const { monthly, ...rest } = report;
-  void monthly;
-  return { ...rest, staffOnly: true };
-}
-
 // 公開ページに置かれた鍵つきファイルを読む（なければ null）
-export async function fetchBox(kind) {
+export async function fetchBox() {
   try {
-    const res = await fetch(FILES[kind].replace(/^docs\//, ""), { cache: "no-cache" });
+    const res = await fetch(FILE.replace(/^docs\//, ""), { cache: "no-cache" });
     return res.ok ? await res.json() : null;
   } catch {
     return null;
@@ -71,12 +63,12 @@ async function gh(path, opts, token) {
   return res;
 }
 
-export async function putBox(kind, box, token) {
-  const path = FILES[kind];
+export async function putBox(box, token) {
+  const path = FILE;
   const cur = await gh(path, { method: "GET" }, token);
   const sha = cur.ok ? (await cur.json()).sha : undefined;
   const body = {
-    message: `レポートを更新（${kind === "owner" ? "オーナー用" : "スタッフ用"}・鍵つき）`,
+    message: "ランキングを更新（鍵つき）",
     content: toB64(enc.encode(JSON.stringify(box))),
     ...(sha ? { sha } : {}),
   };

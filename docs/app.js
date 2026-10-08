@@ -1,7 +1,7 @@
 // サロン助手：レポートのランキング・キーワード・スタイル文・ブログ文
-import { pageItems, parseReport, reportSummary } from "./report.js";
+import { pageItems, parseReport } from "./report.js";
 import { scoreKeywords, keywordSources, parseRakko } from "./keywords.js";
-import { lock, unlock, staffView, fetchBox, putBox, randomPass } from "./share.js";
+import { lock, unlock, fetchBox, putBox, randomPass } from "./share.js";
 import { makeStyle, makeBlog, testKey, imageBlock, checkNg, stylePrompt, blogPrompt, parseStyle, parseBlog, AI_APPS } from "./ai.js";
 
 const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/";
@@ -23,7 +23,7 @@ const state = {
   reports: store.get("reports", {}),
   issue: null,
   selKw: store.get("kw", []),
-  rankTab: store.get("rankTab", "staff"),
+  rankTab: store.get("rankTab", "kw"),
   kwFilter: "all",
   staffId: store.get("staff", null),
   styleOut: store.get("styleOut", null),
@@ -33,7 +33,7 @@ const state = {
   photo: { style: null, blog: null },
   aiApp: store.get("aiApp", "chatgpt"),
   rakko: store.get("rakko", null),
-  role: null,        // 合言葉で開けた種類：owner（全部）／staff（売上なし）
+  role: null,        // 合言葉で開けたか：ok／ng
   sharedAt: null,    // 配られたレポートの更新日時
   withPhoto: { style: false, blog: false },
   withImage: store.get("withImage", false),
@@ -71,62 +71,71 @@ function setKw(list) {
   store.set("kw", state.selKw);
 }
 
-// ============ ランキング ============
-function pct(a, b) {
-  if (a == null || b == null || !b) return null;
-  return ((a - b) / b) * 100;
+// ============ ランキング（レポートに出てくる言葉だけ） ============
+// 売上・来店数・予約数などはビューティーメリットで管理しているので、このアプリでは扱わない。
+// レポートからは「スタイル名と閲覧数・ブックマーク数」だけを取り出して保存・配布する。
+function wordsOnly(rep) {
+  const pick = (list) => (list || []).map((s) => ({ name: s.name, count: s.count }));
+  return {
+    salon: rep.salon, issue: rep.issue, updated: rep.updated,
+    styleViews: pick(rep.styleViews), bookmarkStyles: pick(rep.bookmarkStyles), newBookmarkStyles: pick(rep.newBookmarkStyles),
+  };
 }
-function deltaHtml(p, unit = "%") {
-  if (p == null || !Number.isFinite(p)) return "";
-  const cls = p > 0.05 ? "up" : p < -0.05 ? "down" : "";
-  const sign = p > 0 ? "+" : "";
-  return `<span class="delta ${cls}">${sign}${fmt(p, unit === "%" ? 1 : 0)}${unit}</span>`;
+// 前の号（比べる相手）
+function prevReport() {
+  const issues = Object.keys(state.reports).sort();
+  const k = issues.indexOf(state.issue);
+  return k > 0 ? state.reports[issues[k - 1]] : null;
+}
+function reportKeywords(r) {
+  return r ? scoreKeywords(keywordSources(wordsOnly(r), null, null), 40) : [];
 }
 
-function rankList(items, { unit = "", deltaOf } = {}) {
+function rankList(items, { unit = "", showDelta = false } = {}) {
   if (!items.length) return `<p class="muted">このレポートには項目がありません。</p>`;
   const max = Math.max(1, ...items.map((i) => i.value));
-  return `<ol class="rank">${items.map((it, k) => `
+  return `<ol class="rank">${items.map((it, k) => {
+    let delta = "";
+    if (showDelta) {
+      if (it.prevRank == null) delta = `<span class="delta up">NEW</span>`;
+      else if (it.prevRank !== k + 1) {
+        const d = it.prevRank - (k + 1);
+        delta = `<span class="delta ${d > 0 ? "up" : "down"}">${d > 0 ? "↑" : "↓"}${Math.abs(d)}</span>`;
+      } else delta = `<span class="delta">→</span>`;
+    }
+    return `
     <li>
       <span class="pos ${k < 3 ? "p" + (k + 1) : ""}">${k + 1}</span>
-      <div class="name">${esc(it.name)}${it.sub ? `<div class="muted small">${esc(it.sub)}</div>` : ""}
+      <div class="name">${esc(it.name)}
         <div class="bar" style="width:${Math.max(3, (it.value / max) * 100)}%"></div></div>
-      <span class="val">${fmt(it.value)}${unit}${deltaOf ? deltaHtml(deltaOf(it), "件") : ""}</span>
-    </li>`).join("")}</ol>`;
+      <span class="val">${fmt(it.value)}${unit}${delta}</span>
+    </li>`;
+  }).join("")}</ol>`;
 }
 
-function latestOf(table) {
-  const n = table?.months?.length ?? 0;
-  return {
-    month: n ? table.months[n - 1] : "",
-    rows: (table?.rows ?? []).map((r) => ({ name: r.name, value: r.v[n - 1] ?? 0, prev: n > 1 ? r.v[n - 2] : null })),
-  };
+// 前の号での順位をつける
+function withPrevRank(items, prevItems) {
+  const pos = new Map();
+  (prevItems || []).forEach((p, k) => { if (!pos.has(p.name)) pos.set(p.name, k + 1); });
+  return items.map((it) => ({ ...it, prevRank: prevItems ? pos.get(it.name) ?? null : undefined }));
+}
+
+function rankData(r, tab) {
+  const prev = prevReport();
+  const kw = (rep) => reportKeywords(rep).map((k) => ({ name: k.word, value: k.score }));
+  const styles = (rep, key, n) => (rep?.[key] || []).slice(0, n).map((s) => ({ name: s.name, value: s.count }));
+  if (tab === "kw") return { title: "よく見られている言葉（点数）", unit: "点", items: withPrevRank(kw(r).slice(0, 30), prev && kw(prev)) };
+  if (tab === "style") return { title: "スタイル名の閲覧数 TOP30", unit: "回", items: withPrevRank(styles(r, "styleViews", 30), prev && styles(prev, "styleViews", 128)) };
+  if (tab === "bookmark") return { title: "ブックマークの多いスタイル（累積）", unit: "件", items: withPrevRank(styles(r, "bookmarkStyles", 30), prev && styles(prev, "bookmarkStyles", 64)) };
+  return { title: "今月ブックマークされたスタイル", unit: "件", items: styles(r, "newBookmarkStyles", 30) };
 }
 
 function summaryText(r) {
-  const m = r.monthly || {};
-  const n = m.labels?.length ?? 0;
-  const i = n - 1;
-  const lines = [`【${r.salon} ${r.issue ? r.issue.slice(0, 2) + "年" + r.issue.slice(2) + "月号" : ""} レポートまとめ】`];
-  if (n) {
-    const p = (arr) => { const v = pct(arr?.[i], arr?.[i - 1]); return v == null ? "" : `（前月比 ${v > 0 ? "+" : ""}${fmt(v, 1)}%）`; };
-    lines.push(`${m.labels[i]} の来店 ${fmt(m.visitors?.[i])}人${p(m.visitors)}`);
-    lines.push(`売上 ${fmt(m.sales?.[i], 1)}万円${p(m.sales)}`);
-    lines.push(`客単価 ${fmt(m.unit?.[i])}円`);
-  }
-  const st = latestOf(r.stylists);
-  if (st.rows.length) {
-    lines.push("", `■スタッフ別ネット予約（${st.month}）`);
-    [...st.rows].sort((a, b) => b.value - a.value).forEach((s, k) => lines.push(`${k + 1}位 ${s.name} ${s.value}件`));
-  }
+  const lines = [`【${r.salon} ${r.issue ? r.issue.slice(0, 2) + "年" + r.issue.slice(2) + "月号" : ""} よく見られている言葉】`];
+  reportKeywords(r).slice(0, 10).forEach((k, i) => lines.push(`${i + 1}位 ${k.word}`));
   if (r.styleViews?.length) {
-    lines.push("", "■よく見られたスタイル TOP3");
-    r.styleViews.slice(0, 3).forEach((s, k) => lines.push(`${k + 1}位 ${s.name}（${fmt(s.count)}回）`));
-  }
-  const cp = latestOf(r.coupons);
-  if (cp.rows.length) {
-    lines.push("", `■予約の多いクーポン TOP3（${cp.month}）`);
-    [...cp.rows].sort((a, b) => b.value - a.value).slice(0, 3).forEach((c, k) => lines.push(`${k + 1}位 ${c.name}（${c.value}件）`));
+    lines.push("", "■よく見られたスタイル TOP5");
+    r.styleViews.slice(0, 5).forEach((s, i) => lines.push(`${i + 1}位 ${s.name}`));
   }
   return lines.join("\n");
 }
@@ -135,82 +144,42 @@ function renderRank() {
   const el = $("#view-rank");
   const issues = Object.keys(state.reports).sort().reverse();
   const r = report();
+  const canShare = !!store.get("ghToken", "");
   const picker = `
     <div class="row">
       ${issues.length > 1 ? `<select id="issueSel" class="grow">${issues.map((k) =>
-        `<option value="${k}" ${k === state.issue ? "selected" : ""}>${esc(k.slice(0, 2))}年${esc(k.slice(2))}月号（${esc(state.reports[k].updated || "")}）</option>`).join("")}</select>` : ""}
-      ${state.role === "staff" ? "" : `<button class="btn ${r ? "sm" : "primary block"}" data-act="pickPdf">${r ? "別のレポートを読み込む" : "サロンレポート（PDF）を読み込む"}</button>`}
-      ${r && store.get("ghToken", "") && state.role !== "staff" ? `<button class="btn sm primary" data-act="publish">全員に配る</button>` : ""}
+        `<option value="${k}" ${k === state.issue ? "selected" : ""}>${esc(k.slice(0, 2))}年${esc(k.slice(2))}月号</option>`).join("")}</select>` : ""}
+      <button class="btn ${r ? "sm" : "primary block"}" data-act="pickPdf">${r ? "別のレポートを読み込む" : "サロンレポート（PDF）を読み込む"}</button>
+      ${r && canShare ? `<button class="btn sm primary" data-act="publish">全員に配る</button>` : ""}
     </div>
     ${state.sharedAt ? `<p class="small muted" style="margin:6px 0 0">配られたレポート（${new Date(state.sharedAt).toLocaleString("ja-JP")} 更新）を表示しています。</p>` : ""}
-    ${r?._local && store.get("ghToken", "") ? `<p class="small" style="margin:6px 0 0;color:var(--accent)">このレポートはまだ全員に配っていません。</p>` : ""}`;
+    ${r?._local && canShare ? `<p class="small" style="margin:6px 0 0;color:var(--accent)">このレポートはまだ全員に配っていません。</p>` : ""}`;
   if (!r) {
     el.innerHTML = `
-      <h2>サロンレポートのランキング</h2>
+      <h2>レポートの言葉ランキング</h2>
       <div class="card note">
         <ol class="steps">
-          <li>サロンボードで「サロンレポート」を開き、PDF をダウンロード（iPhone では「ファイル」に保存）</li>
+          <li>サロンボードで「サロンレポート」を開き、PDF をダウンロード</li>
           <li>下のボタンを押して、そのPDFを選ぶ</li>
         </ol>
-        <p class="small muted">読み込んだレポート（売上・スタッフ名など）は<b>この端末の中だけ</b>で計算・保存します。「全員に配る」を使うときだけ、合言葉で鍵をかけてから保存します。</p>
-        <p class="small muted">スタッフの方は、設定タブで「お店の合言葉」を入れると、配られたレポートが見られます。</p>
+        <p class="small muted">PDFからは<b>スタイル名と閲覧数・ブックマーク数だけ</b>を取り出します。売上・来店数・予約数は読み込みません。</p>
+        <p class="small muted">スタッフの方は、設定タブで「お店の合言葉」を入れると、配られたランキングが見られます。</p>
       </div>
       ${picker}`;
     return;
   }
-  const m = r.monthly || {};
-  const n = m.labels?.length ?? 0, i = n - 1;
-  const kpi = (label, v, arr, unit, d = 0) => `
-    <div class="kpi"><div class="label">${label}</div>
-      <div class="value">${fmt(v, d)}<small>${unit}</small></div>
-      ${deltaHtml(pct(arr?.[i], arr?.[i - 1]))}<span class="muted small"> 前月比</span>
-      ${n > 12 ? `<div>${deltaHtml(pct(arr?.[i], arr?.[i - 12]))}<span class="muted small"> 前年比</span></div>` : ""}
-    </div>`;
-
-  const tabs = [
-    ["staff", "スタッフ予約"], ["staffView", "スタッフ閲覧"], ["bookmark", "ブックマーク"],
-    ["style", "スタイル閲覧"], ["coupon", "クーポン"], ["menu", "メニュー"], ...(n ? [["month", "月別"]] : []),
-  ];
-  let body = "";
-  const t = state.rankTab === "month" && !n ? "staff" : state.rankTab;
-  if (t === "staff") {
-    const st = latestOf(r.stylists);
-    body = `<h3>ネット予約数（${esc(st.month)}）</h3>` +
-      rankList([...st.rows].sort((a, b) => b.value - a.value), { unit: "件", deltaOf: (x) => (x.prev == null ? null : x.value - x.prev) }) +
-      `<p class="small muted">右の小さな数字は前月との差です。</p>`;
-  } else if (t === "staffView") {
-    body = `<h3>スタイリストページの閲覧数</h3>` + rankList((r.stylistViews || []).map((s) => ({ name: s.name, value: s.count })), { unit: "回" });
-  } else if (t === "bookmark") {
-    body = `<h3>スタッフのブックマーク数（累積）</h3>` + rankList((r.bookmarkStylists || []).map((s) => ({ name: s.name, value: s.count })), { unit: "件" }) +
-      `<h3 style="margin-top:14px">今月ブックマークされたスタイル</h3>` +
-      rankList((r.newBookmarkStyles || []).slice(0, 15).map((s) => ({ name: s.name, sub: s.stylist, value: s.count })), { unit: "件" });
-  } else if (t === "style") {
-    body = `<h3>スタイルの閲覧数 TOP30</h3>` + rankList((r.styleViews || []).slice(0, 30).map((s) => ({ name: s.name, value: s.count })), { unit: "回" });
-  } else if (t === "coupon") {
-    const cp = latestOf(r.coupons);
-    body = `<h3>クーポン別ネット予約数（${esc(cp.month)}）</h3>` +
-      rankList([...cp.rows].sort((a, b) => b.value - a.value).filter((c) => c.value > 0).slice(0, 20), { unit: "件", deltaOf: (x) => (x.prev == null ? null : x.value - x.prev) });
-  } else if (t === "menu") {
-    const mn = latestOf(r.menus);
-    body = `<h3>メニュー別ネット予約数（${esc(mn.month)}）</h3>` +
-      rankList([...mn.rows].sort((a, b) => b.value - a.value).filter((c) => c.value > 0), { unit: "件", deltaOf: (x) => (x.prev == null ? null : x.value - x.prev) });
-  } else if (t === "month") {
-    body = `<h3>月ごとの推移</h3><table class="months"><thead><tr><th>月</th><th>来店</th><th>売上(万円)</th><th>客単価</th></tr></thead><tbody>${
-      (m.labels || []).map((lab, k) => `<tr><td>${esc(lab)}</td><td>${fmt(m.visitors?.[k])}</td><td>${fmt(m.sales?.[k], 1)}</td><td>${fmt(m.unit?.[k])}</td></tr>`).reverse().join("")
-    }</tbody></table>`;
-  }
+  const tabs = [["kw", "言葉"], ["style", "スタイル閲覧"], ["bookmark", "ブックマーク"], ["newBookmark", "今月のブックマーク"]];
+  const t = tabs.some(([k]) => k === state.rankTab) ? state.rankTab : "kw";
+  const d = rankData(r, t);
+  const prev = prevReport();
   el.innerHTML = `
     ${picker}
-    ${n ? `<h2>${esc(m.labels?.[i] ?? "")} のようす</h2>
-    <div class="kpis">
-      ${kpi("来店数", m.visitors?.[i], m.visitors, "人")}
-      ${kpi("売上", m.sales?.[i], m.sales, "万円", 1)}
-      ${kpi("客単価", m.unit?.[i], m.unit, "円")}
-    </div>` : ""}
-    <div class="row end" style="margin-top:8px"><button class="btn sm" data-act="copySummary">まとめ文をコピー（LINE用）</button></div>
-    <h2>ランキング</h2>
+    <h2>${esc(r.issue ? r.issue.slice(0, 2) + "年" + r.issue.slice(2) + "月号" : "")} のランキング</h2>
     <div class="seg">${tabs.map(([k, l]) => `<button data-rank="${k}" class="${k === t ? "on" : ""}">${l}</button>`).join("")}</div>
-    <div class="card">${body}</div>
+    <div class="card"><h3>${esc(d.title)}</h3>${rankList(d.items, { unit: d.unit, showDelta: !!prev && t !== "newBookmark" })}
+      ${prev && t !== "newBookmark" ? `<p class="small muted">↑↓は前の号（${esc(prev.issue)}月号）からの順位の変化です。</p>` : ""}</div>
+    <div class="row end"><button class="btn sm" data-act="copySummary">ランキングをコピー（LINE用）</button>
+      <button class="btn sm primary" data-go="kw">キーワードを選ぶ</button></div>
     <p class="small muted">データ最終更新日 ${esc(r.updated || "—")}（レポートに書かれている日付）</p>`;
 }
 
@@ -226,9 +195,8 @@ async function importPdf(file) {
     }).promise;
     const pages = [];
     for (let p = 1; p <= doc.numPages; p++) pages.push(await pageItems(await doc.getPage(p)));
-    const rep = parseReport(pages);
-    const sum = reportSummary(rep);
-    if (!sum.months && !sum.stylists && !sum.styles) {
+    const rep = wordsOnly(parseReport(pages));
+    if (!rep.styleViews.length && !rep.bookmarkStyles.length) {
       toast("サロンレポートとして読み取れませんでした。ファイルを確認してください。");
       return;
     }
@@ -237,7 +205,7 @@ async function importPdf(file) {
     state.reports[key] = rep;
     state.issue = key;
     if (!store.set("reports", state.reports)) toast("保存できませんでした（プライベートモードの可能性）。表示はできます。");
-    else toast(`読み込みました（スタッフ${sum.stylists}人・スタイル${sum.styles}件・クーポン${sum.coupons}件）`);
+    else toast(`読み込みました（スタイル${rep.styleViews.length}件）`);
     renderAll();
   } catch (e) {
     console.error(e);
@@ -251,29 +219,25 @@ function keepLatest(map) {
   return Object.fromEntries(Object.keys(map).sort().slice(-MAX_ISSUES).map((k) => [k, map[k]]));
 }
 
-// 合言葉で、配られたレポートを開く（オーナー用 → スタッフ用 の順に試す）
+// 合言葉で、配られたランキングを開く
 async function loadShared() {
   const pass = store.get("pass", "");
   if (!pass) return;
-  let anyBox = false;
-  for (const kind of ["owner", "staff"]) {
-    const box = await fetchBox(kind);
-    if (!box) continue;
-    anyBox = true;
-    const data = await unlock(box, pass);
-    if (!data) continue;
-    state.role = kind;
-    state.sharedAt = box.at;
-    // スタッフ用は売上なし。自分の端末に全部入りがあっても、配られた分を優先して表示する
-    state.reports = kind === "owner" ? { ...data.reports, ...onlyLocal() } : data.reports;
-    store.set("reports", state.reports);
-    const issues = Object.keys(state.reports).sort();
-    state.issue = issues[issues.length - 1] || null;
+  const box = await fetchBox();
+  if (!box) return;
+  const data = await unlock(box, pass);
+  if (!data) {
+    state.role = "ng";
+    // 合言葉が変わった（辞めた人など）ときは、前に配られた分もこの端末から消す
+    forgetShared();
     return;
   }
-  state.role = "ng";
-  // 合言葉が変わった（辞めた人など）ときは、前に配られた分もこの端末から消す
-  if (anyBox) forgetShared();
+  state.role = "ok";
+  state.sharedAt = box.at;
+  state.reports = { ...data.reports, ...onlyLocal() };
+  store.set("reports", state.reports);
+  const issues = Object.keys(state.reports).sort();
+  state.issue = issues[issues.length - 1] || null;
 }
 function forgetShared() {
   state.reports = onlyLocal();
@@ -282,31 +246,28 @@ function forgetShared() {
   const issues = Object.keys(state.reports).sort();
   state.issue = issues[issues.length - 1] || null;
 }
-// オーナーの端末で、まだ配っていない（この端末だけで読み込んだ）レポート
+// この端末で読み込んで、まだ配っていないレポート
 function onlyLocal() {
   const local = store.get("reports", {});
-  return Object.fromEntries(Object.entries(local).filter(([, r]) => !r.staffOnly && r._local));
+  return Object.fromEntries(Object.entries(local).filter(([, r]) => r._local));
 }
 
 async function publishReports() {
   const token = store.get("ghToken", "");
-  const ownerPass = store.get("ownerPass", "");
-  const staffPass = store.get("staffPass", "");
-  if (!token || !ownerPass || !staffPass) { toast("設定タブの「レポートを全員に配る」を先に設定してください"); go("set"); return; }
+  const pass = store.get("pass", "");
+  if (!token || !pass) { toast("設定タブの「オーナー用：ランキングを全員に配る設定」を先にしてください"); go("set"); return; }
   toast("鍵をかけて保存しています…");
   try {
     // すでに配ってある分と合わせる（別の端末で配った月が消えないように）
     let merged = {};
-    const cur = await fetchBox("owner");
+    const cur = await fetchBox();
     if (cur) {
-      const old = await unlock(cur, ownerPass);
+      const old = await unlock(cur, pass);
       if (old) merged = old.reports;
     }
-    for (const [k, r] of Object.entries(state.reports)) if (!r.staffOnly) merged[k] = { ...r, _local: undefined };
+    for (const [k, r] of Object.entries(state.reports)) merged[k] = wordsOnly(r);
     merged = keepLatest(merged);
-    const staffMap = Object.fromEntries(Object.entries(merged).map(([k, r]) => [k, staffView(r)]));
-    await putBox("owner", await lock({ reports: merged }, ownerPass), token);
-    await putBox("staff", await lock({ reports: staffMap }, staffPass), token);
+    await putBox(await lock({ reports: merged }, pass), token);
     for (const r of Object.values(state.reports)) delete r._local;
     store.set("reports", state.reports);
     toast(`配りました（${Object.keys(merged).length}か月分）。1〜2分で全員に反映されます`);
@@ -345,7 +306,7 @@ function selBar(where) {
 function renderKw() {
   const el = $("#view-kw");
   const all = keywords();
-  const filters = [["all", "すべて"], ["ラッコ", "検索（ラッコ）"], ["スタイル閲覧", "スタイル閲覧"], ["ブックマーク", "ブックマーク"], ["クーポン予約", "クーポン予約"], ["ブログ題名", "ブログ題名"]];
+  const filters = [["all", "すべて"], ["ラッコ", "検索（ラッコ）"], ["スタイル閲覧", "スタイル閲覧"], ["ブックマーク", "ブックマーク"], ["ブログ題名", "ブログ題名"]];
   // レポートやブログでも人気で、検索もされている言葉
   const both = state.rakko ? all.filter((k) => k.from.includes("ラッコ") && k.from.length > 1) : [];
   const chip = (k) => `<button class="chip ${state.selKw.includes(k.word) ? "on" : ""}" data-kw="${esc(k.word)}">${esc(k.word)}<span class="sc">${k.score}</span>${k.from.includes("ラッコ") ? `<span class="tag">検索</span>` : ""}</button>`;
@@ -358,7 +319,7 @@ function renderKw() {
       <p class="small muted">レポート・ブログで人気があり、ラッコキーワードでも検索されている言葉です。まず使いたい候補です。</p>
       <div class="chips">${both.map(chip).join("")}</div>` : ""}
     <h2>よく見られている言葉</h2>
-    <p class="small muted">${r ? `レポート（${esc(r.issue)}月号）の閲覧数・ブックマーク・予約数` : "レポート未読み込みのため、ブログの題名だけ"}から点数をつけています。数字が大きいほど、よく見られている言葉です。</p>
+    <p class="small muted">${r ? `レポート（${esc(r.issue)}月号）のスタイル閲覧数・ブックマーク数とブログの題名` : "レポート未読み込みのため、ブログの題名だけ"}から点数をつけています。数字が大きいほど、よく見られている言葉です。</p>
     <div class="seg">${filters.map(([k, l]) => `<button data-kwf="${esc(k)}" class="${k === state.kwFilter ? "on" : ""}">${l}</button>`).join("")}</div>
     <div class="chips">${list.length ? list.map(chip).join("") :
       `<p class="muted">まだ言葉がありません。ランキングタブでレポートを読み込んでください。</p>`}</div>`;
@@ -559,20 +520,20 @@ function renderSet() {
   const links = [["キーワードを開く", "?tab=kw"], ["スタイル作成を開く", "?tab=style"], ["ブログ作成を開く", "?tab=blog"]]
     .concat(staffList().map((s) => [`${s.name}さんのブログ作成`, `?tab=blog&staff=${s.id}`]));
   const pass = store.get("pass", "");
-  const roleText = { owner: "オーナー用（売上も見られます）", staff: "スタッフ用（売上は見られません）", ng: "合言葉が違うか、まだレポートが配られていません" }[state.role] || "";
+  const roleText = { ok: "配られたランキングを見られます", ng: "合言葉が違うか、まだランキングが配られていません" }[state.role] || "";
   el.innerHTML = `
     <h2>お店の合言葉</h2>
     <div class="card">
-      <p class="small" style="margin-top:0">オーナーが配ったレポート（ランキング）を見るための合言葉です。店長・オーナーから聞いてください。</p>
+      <p class="small" style="margin-top:0">オーナーが配ったランキングを見るための合言葉です。店長・オーナーから聞いてください。</p>
       <div class="row"><input type="password" id="passIn" class="grow" placeholder="${pass ? "入力済み" : "合言葉"}" autocomplete="off">
         <button class="btn" data-act="savePass">保存</button></div>
       ${roleText ? `<p class="small" style="margin-bottom:0">いまの状態：${esc(roleText)}</p>` : ""}
       ${pass ? `<div class="row end" style="margin-top:6px"><button class="btn sm" data-act="delPass">合言葉を消す</button></div>` : ""}
     </div>
 
-    <details class="card"><summary><b>オーナー用：レポートを全員に配る設定</b>（PCで1回だけ）</summary>
+    <details class="card"><summary><b>オーナー用：ランキングを全員に配る設定</b>（PCで1回だけ）</summary>
       <div style="margin-top:10px">
-        <p class="small" style="margin-top:0">PCでレポートを読み込んで「全員に配る」を押すと、合言葉で鍵をかけてから保存し、全員のアプリに反映されます。</p>
+        <p class="small" style="margin-top:0">PCでレポートを読み込んで「全員に配る」を押すと、言葉のランキング（スタイル名と閲覧数・ブックマーク数）だけを合言葉で鍵をかけて保存し、全員のアプリに反映します。</p>
         <label class="field"><span>GitHub の許可証（アクセストークン）${store.get("ghToken", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
           <input type="password" id="ghToken" placeholder="github_pat_ から始まる文字" autocomplete="off"></label>
         <ol class="steps small">
@@ -581,12 +542,9 @@ function renderSet() {
           <li>Expiration（期限）：1年 ／ Repository access：「Only select repositories」で <code>salon-helper</code> だけ選ぶ</li>
           <li>Permissions → Repository permissions →「Contents」を「Read and write」→ 作成して、表示された文字を上に貼る</li>
         </ol>
-        <label class="field"><span>オーナー用の合言葉（売上も見られる）${store.get("ownerPass", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
-          <div class="row"><input type="text" id="ownerPass" class="grow" placeholder="12文字以上" autocomplete="off">
-            <button class="btn sm" data-gen="ownerPass">自動で作る</button></div></label>
-        <label class="field"><span>スタッフ用の合言葉（売上は見られない）${store.get("staffPass", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
-          <div class="row"><input type="text" id="staffPass" class="grow" placeholder="12文字以上" autocomplete="off">
-            <button class="btn sm" data-gen="staffPass">自動で作る</button></div></label>
+        <label class="field"><span>お店の合言葉（全員共通）${store.get("pass", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
+          <div class="row"><input type="text" id="sharePass" class="grow" placeholder="12文字以上" autocomplete="off">
+            <button class="btn sm" data-gen="sharePass">自動で作る</button></div></label>
         <button class="btn primary" data-act="saveShare">保存</button>
         <p class="small muted">合言葉は、公開の場所に置くデータの鍵になります。短い言葉や誕生日などは使わず、「自動で作る」をおすすめします。<br>
         合言葉を変えたら、もう一度「全員に配る」を押し、スタッフに新しい合言葉を伝えてください（辞めた人が出たときなど）。</p>
@@ -749,7 +707,7 @@ document.addEventListener("click", async (ev) => {
       store.set("pass", v);
       toast("確認しています…");
       await loadShared();
-      toast(state.role === "owner" ? "オーナー用で開きました" : state.role === "staff" ? "開きました" : "合言葉が違うか、まだレポートが配られていません");
+      toast(state.role === "ok" ? "開きました" : "合言葉が違うか、まだランキングが配られていません");
       renderAll();
       break;
     }
@@ -758,12 +716,10 @@ document.addEventListener("click", async (ev) => {
       toast("合言葉を消しました"); renderSet();
       break;
     case "saveShare": {
-      const t = $("#ghToken").value.trim(), op = $("#ownerPass").value.trim(), sp = $("#staffPass").value.trim();
-      if ((op && len(op) < 12) || (sp && len(sp) < 12)) { toast("合言葉は12文字以上にしてください"); break; }
-      if (op && sp && op === sp) { toast("オーナー用とスタッフ用は、別の合言葉にしてください"); break; }
+      const t = $("#ghToken").value.trim(), sp = $("#sharePass").value.trim();
+      if (sp && len(sp) < 12) { toast("合言葉は12文字以上にしてください"); break; }
       if (t) store.set("ghToken", t);
-      if (op) { store.set("ownerPass", op); store.set("pass", op); }
-      if (sp) store.set("staffPass", sp);
+      if (sp) store.set("pass", sp);
       toast("保存しました。合言葉はメモしておいてください");
       renderSet();
       break;
@@ -837,6 +793,9 @@ document.addEventListener("keydown", (ev) => {
 // ============ はじめ ============
 async function init() {
   const q = new URLSearchParams(location.search);
+  // 以前の版で保存した売上などが端末に残っていたら、言葉だけに整理し直す
+  state.reports = Object.fromEntries(Object.entries(state.reports).map(([k, r]) => [k, { ...wordsOnly(r), ...(r._local ? { _local: true } : {}) }]));
+  store.set("reports", state.reports);
   const issues = Object.keys(state.reports).sort();
   state.issue = issues[issues.length - 1] || null;
   if (q.get("kw")) setKw(q.get("kw").split(/[、,]/));
