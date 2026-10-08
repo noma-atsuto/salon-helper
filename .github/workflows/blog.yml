@@ -1,0 +1,41 @@
+# 毎朝、ホットペッパービューティーに公開されているお店のブログを集めて、アプリのお手本データを更新する
+name: ブログ取得
+
+on:
+  schedule:
+    - cron: "7 21 * * *"   # 毎朝 6:07（日本時間）。時刻はUTC（日本時間 −9時間）で書く
+  workflow_dispatch:         # 「Run workflow」ボタンで手動実行もできる
+
+permissions:
+  contents: write
+
+concurrency:
+  group: blog
+  cancel-in-progress: false
+
+jobs:
+  blog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ブログを取得
+        run: python -m engine.blog
+
+      - name: 結果を保存（コミット）
+        run: |
+          git config user.name "salon-bot"
+          git config user.email "salon-bot@users.noreply.github.com"
+          git add docs/data
+          if git diff --cached --quiet; then
+            echo "変更なし"
+          else
+            git commit -m "ブログ更新 $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')"
+            git pull --rebase --autostash || true
+            git push
+          fi
