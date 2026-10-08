@@ -1,6 +1,7 @@
 // サロン助手：レポートのランキング・キーワード・スタイル文・ブログ文
 import { pageItems, parseReport, reportSummary } from "./report.js";
 import { scoreKeywords, keywordSources, parseRakko } from "./keywords.js";
+import { lock, unlock, staffView, fetchBox, putBox, randomPass } from "./share.js";
 import { makeStyle, makeBlog, testKey, imageBlock, checkNg, stylePrompt, blogPrompt, parseStyle, parseBlog, AI_APPS } from "./ai.js";
 
 const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/";
@@ -32,6 +33,8 @@ const state = {
   photo: { style: null, blog: null },
   aiApp: store.get("aiApp", "chatgpt"),
   rakko: store.get("rakko", null),
+  role: null,        // 合言葉で開けた種類：owner（全部）／staff（売上なし）
+  sharedAt: null,    // 配られたレポートの更新日時
   withPhoto: { style: false, blog: false },
   withImage: store.get("withImage", false),
 };
@@ -136,8 +139,11 @@ function renderRank() {
     <div class="row">
       ${issues.length > 1 ? `<select id="issueSel" class="grow">${issues.map((k) =>
         `<option value="${k}" ${k === state.issue ? "selected" : ""}>${esc(k.slice(0, 2))}年${esc(k.slice(2))}月号（${esc(state.reports[k].updated || "")}）</option>`).join("")}</select>` : ""}
-      <button class="btn ${r ? "sm" : "primary block"}" data-act="pickPdf">${r ? "別のレポートを読み込む" : "サロンレポート（PDF）を読み込む"}</button>
-    </div>`;
+      ${state.role === "staff" ? "" : `<button class="btn ${r ? "sm" : "primary block"}" data-act="pickPdf">${r ? "別のレポートを読み込む" : "サロンレポート（PDF）を読み込む"}</button>`}
+      ${r && store.get("ghToken", "") && state.role !== "staff" ? `<button class="btn sm primary" data-act="publish">全員に配る</button>` : ""}
+    </div>
+    ${state.sharedAt ? `<p class="small muted" style="margin:6px 0 0">配られたレポート（${new Date(state.sharedAt).toLocaleString("ja-JP")} 更新）を表示しています。</p>` : ""}
+    ${r?._local && store.get("ghToken", "") ? `<p class="small" style="margin:6px 0 0;color:var(--accent)">このレポートはまだ全員に配っていません。</p>` : ""}`;
   if (!r) {
     el.innerHTML = `
       <h2>サロンレポートのランキング</h2>
@@ -146,7 +152,8 @@ function renderRank() {
           <li>サロンボードで「サロンレポート」を開き、PDF をダウンロード（iPhone では「ファイル」に保存）</li>
           <li>下のボタンを押して、そのPDFを選ぶ</li>
         </ol>
-        <p class="small muted">読み込んだレポート（売上・スタッフ名など）は<b>この端末の中だけ</b>で計算・保存し、インターネットには送りません。</p>
+        <p class="small muted">読み込んだレポート（売上・スタッフ名など）は<b>この端末の中だけ</b>で計算・保存します。「全員に配る」を使うときだけ、合言葉で鍵をかけてから保存します。</p>
+        <p class="small muted">スタッフの方は、設定タブで「お店の合言葉」を入れると、配られたレポートが見られます。</p>
       </div>
       ${picker}`;
     return;
@@ -162,10 +169,10 @@ function renderRank() {
 
   const tabs = [
     ["staff", "スタッフ予約"], ["staffView", "スタッフ閲覧"], ["bookmark", "ブックマーク"],
-    ["style", "スタイル閲覧"], ["coupon", "クーポン"], ["menu", "メニュー"], ["month", "月別"],
+    ["style", "スタイル閲覧"], ["coupon", "クーポン"], ["menu", "メニュー"], ...(n ? [["month", "月別"]] : []),
   ];
   let body = "";
-  const t = state.rankTab;
+  const t = state.rankTab === "month" && !n ? "staff" : state.rankTab;
   if (t === "staff") {
     const st = latestOf(r.stylists);
     body = `<h3>ネット予約数（${esc(st.month)}）</h3>` +
@@ -194,12 +201,12 @@ function renderRank() {
   }
   el.innerHTML = `
     ${picker}
-    <h2>${esc(m.labels?.[i] ?? "")} のようす</h2>
+    ${n ? `<h2>${esc(m.labels?.[i] ?? "")} のようす</h2>
     <div class="kpis">
       ${kpi("来店数", m.visitors?.[i], m.visitors, "人")}
       ${kpi("売上", m.sales?.[i], m.sales, "万円", 1)}
       ${kpi("客単価", m.unit?.[i], m.unit, "円")}
-    </div>
+    </div>` : ""}
     <div class="row end" style="margin-top:8px"><button class="btn sm" data-act="copySummary">まとめ文をコピー（LINE用）</button></div>
     <h2>ランキング</h2>
     <div class="seg">${tabs.map(([k, l]) => `<button data-rank="${k}" class="${k === t ? "on" : ""}">${l}</button>`).join("")}</div>
@@ -226,6 +233,7 @@ async function importPdf(file) {
       return;
     }
     const key = rep.issue || new Date().toISOString().slice(2, 7).replace("-", "");
+    rep._local = true;
     state.reports[key] = rep;
     state.issue = key;
     if (!store.set("reports", state.reports)) toast("保存できませんでした（プライベートモードの可能性）。表示はできます。");
@@ -234,6 +242,77 @@ async function importPdf(file) {
   } catch (e) {
     console.error(e);
     toast("読み取りに失敗しました: " + e.message);
+  }
+}
+
+// ============ 全員に配る（鍵つき） ============
+const MAX_ISSUES = 12;
+function keepLatest(map) {
+  return Object.fromEntries(Object.keys(map).sort().slice(-MAX_ISSUES).map((k) => [k, map[k]]));
+}
+
+// 合言葉で、配られたレポートを開く（オーナー用 → スタッフ用 の順に試す）
+async function loadShared() {
+  const pass = store.get("pass", "");
+  if (!pass) return;
+  let anyBox = false;
+  for (const kind of ["owner", "staff"]) {
+    const box = await fetchBox(kind);
+    if (!box) continue;
+    anyBox = true;
+    const data = await unlock(box, pass);
+    if (!data) continue;
+    state.role = kind;
+    state.sharedAt = box.at;
+    // スタッフ用は売上なし。自分の端末に全部入りがあっても、配られた分を優先して表示する
+    state.reports = kind === "owner" ? { ...data.reports, ...onlyLocal() } : data.reports;
+    store.set("reports", state.reports);
+    const issues = Object.keys(state.reports).sort();
+    state.issue = issues[issues.length - 1] || null;
+    return;
+  }
+  state.role = "ng";
+  // 合言葉が変わった（辞めた人など）ときは、前に配られた分もこの端末から消す
+  if (anyBox) forgetShared();
+}
+function forgetShared() {
+  state.reports = onlyLocal();
+  store.set("reports", state.reports);
+  state.sharedAt = null;
+  const issues = Object.keys(state.reports).sort();
+  state.issue = issues[issues.length - 1] || null;
+}
+// オーナーの端末で、まだ配っていない（この端末だけで読み込んだ）レポート
+function onlyLocal() {
+  const local = store.get("reports", {});
+  return Object.fromEntries(Object.entries(local).filter(([, r]) => !r.staffOnly && r._local));
+}
+
+async function publishReports() {
+  const token = store.get("ghToken", "");
+  const ownerPass = store.get("ownerPass", "");
+  const staffPass = store.get("staffPass", "");
+  if (!token || !ownerPass || !staffPass) { toast("設定タブの「レポートを全員に配る」を先に設定してください"); go("set"); return; }
+  toast("鍵をかけて保存しています…");
+  try {
+    // すでに配ってある分と合わせる（別の端末で配った月が消えないように）
+    let merged = {};
+    const cur = await fetchBox("owner");
+    if (cur) {
+      const old = await unlock(cur, ownerPass);
+      if (old) merged = old.reports;
+    }
+    for (const [k, r] of Object.entries(state.reports)) if (!r.staffOnly) merged[k] = { ...r, _local: undefined };
+    merged = keepLatest(merged);
+    const staffMap = Object.fromEntries(Object.entries(merged).map(([k, r]) => [k, staffView(r)]));
+    await putBox("owner", await lock({ reports: merged }, ownerPass), token);
+    await putBox("staff", await lock({ reports: staffMap }, staffPass), token);
+    for (const r of Object.values(state.reports)) delete r._local;
+    store.set("reports", state.reports);
+    toast(`配りました（${Object.keys(merged).length}か月分）。1〜2分で全員に反映されます`);
+  } catch (e) {
+    console.error(e);
+    toast(e.message || "配れませんでした");
   }
 }
 
@@ -479,7 +558,41 @@ function renderSet() {
   const base = location.origin + location.pathname;
   const links = [["キーワードを開く", "?tab=kw"], ["スタイル作成を開く", "?tab=style"], ["ブログ作成を開く", "?tab=blog"]]
     .concat(staffList().map((s) => [`${s.name}さんのブログ作成`, `?tab=blog&staff=${s.id}`]));
+  const pass = store.get("pass", "");
+  const roleText = { owner: "オーナー用（売上も見られます）", staff: "スタッフ用（売上は見られません）", ng: "合言葉が違うか、まだレポートが配られていません" }[state.role] || "";
   el.innerHTML = `
+    <h2>お店の合言葉</h2>
+    <div class="card">
+      <p class="small" style="margin-top:0">オーナーが配ったレポート（ランキング）を見るための合言葉です。店長・オーナーから聞いてください。</p>
+      <div class="row"><input type="password" id="passIn" class="grow" placeholder="${pass ? "入力済み" : "合言葉"}" autocomplete="off">
+        <button class="btn" data-act="savePass">保存</button></div>
+      ${roleText ? `<p class="small" style="margin-bottom:0">いまの状態：${esc(roleText)}</p>` : ""}
+      ${pass ? `<div class="row end" style="margin-top:6px"><button class="btn sm" data-act="delPass">合言葉を消す</button></div>` : ""}
+    </div>
+
+    <details class="card"><summary><b>オーナー用：レポートを全員に配る設定</b>（PCで1回だけ）</summary>
+      <div style="margin-top:10px">
+        <p class="small" style="margin-top:0">PCでレポートを読み込んで「全員に配る」を押すと、合言葉で鍵をかけてから保存し、全員のアプリに反映されます。</p>
+        <label class="field"><span>GitHub の許可証（アクセストークン）${store.get("ghToken", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
+          <input type="password" id="ghToken" placeholder="github_pat_ から始まる文字" autocomplete="off"></label>
+        <ol class="steps small">
+          <li>github.com にログイン → 右上のアイコン →「Settings」→ 左下「Developer settings」</li>
+          <li>「Personal access tokens」→「Fine-grained tokens」→「Generate new token」</li>
+          <li>Expiration（期限）：1年 ／ Repository access：「Only select repositories」で <code>salon-helper</code> だけ選ぶ</li>
+          <li>Permissions → Repository permissions →「Contents」を「Read and write」→ 作成して、表示された文字を上に貼る</li>
+        </ol>
+        <label class="field"><span>オーナー用の合言葉（売上も見られる）${store.get("ownerPass", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
+          <div class="row"><input type="text" id="ownerPass" class="grow" placeholder="12文字以上" autocomplete="off">
+            <button class="btn sm" data-gen="ownerPass">自動で作る</button></div></label>
+        <label class="field"><span>スタッフ用の合言葉（売上は見られない）${store.get("staffPass", "") ? '<span class="muted">（保存済み）</span>' : ""}</span>
+          <div class="row"><input type="text" id="staffPass" class="grow" placeholder="12文字以上" autocomplete="off">
+            <button class="btn sm" data-gen="staffPass">自動で作る</button></div></label>
+        <button class="btn primary" data-act="saveShare">保存</button>
+        <p class="small muted">合言葉は、公開の場所に置くデータの鍵になります。短い言葉や誕生日などは使わず、「自動で作る」をおすすめします。<br>
+        合言葉を変えたら、もう一度「全員に配る」を押し、スタッフに新しい合言葉を伝えてください（辞めた人が出たときなど）。</p>
+      </div>
+    </details>
+
     <h2>文章づくりに使うAI</h2>
     <div class="card note small">
       ふだんは、スタイル・ブログタブの「お願い文をコピー」から、ChatGPT・Gemini・Copilot・Claude の<b>無料版</b>に貼り付けて使えます（費用はかかりません。1日に使える回数には上限があります）。
@@ -579,6 +692,7 @@ document.addEventListener("click", async (ev) => {
   if (d.unsel) { setKw(state.selKw.filter((w) => w !== d.unsel)); return renders[state.view](); }
   if (d.staff) { state.staffId = d.staff; store.set("staff", d.staff); return renderBlog(); }
   if (d.rakko) { window.open(RAKKO_URL + encodeURIComponent(d.rakko), "_blank"); return; }
+  if (d.gen) { $("#" + d.gen).value = randomPass(); return; }
   if (d.aiapp) { state.aiApp = d.aiapp; store.set("aiApp", d.aiapp); return renders[state.view](); }
   if (d.blen) { state.blogLen = d.blen; store.set("blogLen", d.blen); return renderBlog(); }
   if (d.tag) return copy(d.tag, `「${d.tag}」をコピーしました`);
@@ -628,6 +742,32 @@ document.addEventListener("click", async (ev) => {
     case "rakkoDel":
       if (confirm("取り込んだラッコキーワードの一覧を消しますか？")) { state.rakko = null; store.del("rakko"); renderKw(); }
       break;
+    case "publish": b.disabled = true; await publishReports(); renderAll(); break;
+    case "savePass": {
+      const v = $("#passIn").value.trim();
+      if (!v) { toast("合言葉を入れてください"); break; }
+      store.set("pass", v);
+      toast("確認しています…");
+      await loadShared();
+      toast(state.role === "owner" ? "オーナー用で開きました" : state.role === "staff" ? "開きました" : "合言葉が違うか、まだレポートが配られていません");
+      renderAll();
+      break;
+    }
+    case "delPass":
+      store.del("pass"); state.role = null; forgetShared();
+      toast("合言葉を消しました"); renderSet();
+      break;
+    case "saveShare": {
+      const t = $("#ghToken").value.trim(), op = $("#ownerPass").value.trim(), sp = $("#staffPass").value.trim();
+      if ((op && len(op) < 12) || (sp && len(sp) < 12)) { toast("合言葉は12文字以上にしてください"); break; }
+      if (op && sp && op === sp) { toast("オーナー用とスタッフ用は、別の合言葉にしてください"); break; }
+      if (t) store.set("ghToken", t);
+      if (op) { store.set("ownerPass", op); store.set("pass", op); }
+      if (sp) store.set("staffPass", sp);
+      toast("保存しました。合言葉はメモしておいてください");
+      renderSet();
+      break;
+    }
     case "promptOnly": copy(promptFor(d.kind), "お願い文をコピーしました"); break;
     case "pasteClip": {
       try {
@@ -661,7 +801,7 @@ document.addEventListener("click", async (ev) => {
     }
     case "delKey": store.del("apiKey"); toast("消しました"); renderSet(); break;
     case "delReports":
-      if (confirm("この端末に保存したレポートを消しますか？")) {
+      if (confirm("この端末に保存したレポートを消しますか？（配ったレポートは消えません）")) {
         state.reports = {}; state.issue = null; store.del("reports"); renderAll();
       }
       break;
@@ -704,6 +844,7 @@ async function init() {
     const res = await fetch("data/blogs.json", { cache: "no-cache" });
     if (res.ok) state.blogs = await res.json();
   } catch { /* オフライン */ }
+  await loadShared();
   const staffQ = q.get("staff");
   if (staffQ) {
     const s = staffList().find((x) => x.id === staffQ || x.name.replace(/\s/g, "") === staffQ.replace(/\s/g, ""));
