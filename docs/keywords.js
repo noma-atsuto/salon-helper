@@ -53,14 +53,14 @@ function wordsIn(text, dictOnly) {
   return [...found];
 }
 
-// sources: [{label, items: [{text, value}]}]
-// それぞれの出どころの中で「一番多いもの = 100点」にそろえてから足し合わせる
+// sources: [{label, items: [{text, value}], weight?}]
+// それぞれの出どころの中で「一番多いもの = 100点」にそろえ、出どころの重み（weight）をかけて足し合わせる
 export function scoreKeywords(sources, limit = 60) {
   const map = new Map();
   for (const src of sources) {
     const max = Math.max(1, ...src.items.map((i) => i.value || 0));
     for (const it of src.items) {
-      const pts = ((it.value || 0) / max) * 100;
+      const pts = ((it.value || 0) / max) * 100 * (src.weight ?? 1);
       if (pts <= 0) continue;
       for (const w of wordsIn(it.text, src.dictOnly)) {
         const e = map.get(w) || { word: w, score: 0, from: new Set() };
@@ -77,7 +77,7 @@ export function scoreKeywords(sources, limit = 60) {
 }
 
 // レポートとブログデータから、点数づけの材料を作る
-export function keywordSources(report, blogs) {
+export function keywordSources(report, blogs, rakko) {
   const out = [];
   if (report) {
     if (report.styleViews?.length) {
@@ -93,7 +93,35 @@ export function keywordSources(report, blogs) {
   }
   if (blogs?.staff?.length) {
     const titles = blogs.staff.flatMap((s) => s.posts.map((p) => ({ text: p.title, value: 1 })));
-    out.push({ label: "ブログ題名", items: titles });
+    // 題名は1本ずつ同じ重さなので、1本10点にとどめる（数が多いと他を押し流すため）
+    out.push({ label: "ブログ題名", weight: 0.1, items: titles });
+  }
+  if (rakko?.items?.length) {
+    // 検索回数（ボリューム）が分かればその数、分からなければ1件=1として数える
+    const vols = rakko.items.map((r) => r.vol).filter((v) => v > 0);
+    const fill = vols.length ? Math.min(...vols) : 1;
+    // 検索回数が分からない一覧は、1つ20点にとどめる
+    out.push({ label: "ラッコ", weight: vols.length ? 1 : 0.2, items: rakko.items.map((r) => ({ text: r.kw, value: r.vol || fill })) });
   }
   return out;
+}
+
+// ラッコキーワードからコピーした一覧を読む。
+// 1行に1つの言葉。表（CSV・タブ区切り）なら、数字の列を「検索回数」とみなす。
+export function parseRakko(text) {
+  const items = [];
+  const seen = new Set();
+  for (const raw of String(text).split(/\r?\n/)) {
+    // タブ区切りならタブだけで分ける（「1,300」のような数字のカンマで分けないため）
+    const cells = (raw.includes("\t") ? raw.split("\t") : raw.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)).map((c) => c.replace(/^"|"$/g, "").trim()).filter(Boolean);
+    if (!cells.length) continue;
+    const kw = cells.find((c) => !/^[\d,.\-–%]+$/.test(c) && !/^(No\.?|#)?\d+[.)．]?$/.test(c));
+    if (!kw || kw.length > 40 || /キーワード|検索ボリューム|月間|CPC|SEO難易度|^順位$/.test(kw)) continue;
+    const clean = kw.replace(/^\d+[.)．]\s*/, "").replace(/\s+/g, " ").trim();
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    const volCell = cells.find((c) => c !== kw && /^[\d,]+$/.test(c));
+    items.push({ kw: clean, vol: volCell ? parseInt(volCell.replace(/,/g, ""), 10) : null });
+  }
+  return items;
 }

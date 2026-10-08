@@ -193,3 +193,5 @@ ol.steps { padding-left: 20px; margin: 6px 0; }
 ol.steps li { margin-bottom: 4px; }
 label.check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin-bottom: 6px; }
 label.check input { width: 18px; height: 18px; margin-top: 1px; flex-shrink: 0; }
+.chip .tag { font-size: 10px; padding: 1px 5px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); }
+.chip.on .tag { background: rgb(255 255 255 / 25%); color: inherit; }

@@ -1,6 +1,6 @@
 // サロン助手：レポートのランキング・キーワード・スタイル文・ブログ文
 import { pageItems, parseReport, reportSummary } from "./report.js";
-import { scoreKeywords, keywordSources } from "./keywords.js";
+import { scoreKeywords, keywordSources, parseRakko } from "./keywords.js";
 import { makeStyle, makeBlog, testKey, imageBlock, checkNg, stylePrompt, blogPrompt, parseStyle, parseBlog, AI_APPS } from "./ai.js";
 
 const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/";
@@ -31,6 +31,7 @@ const state = {
   busy: false,
   photo: { style: null, blog: null },
   aiApp: store.get("aiApp", "chatgpt"),
+  rakko: store.get("rakko", null),
   withPhoto: { style: false, blog: false },
   withImage: store.get("withImage", false),
 };
@@ -238,7 +239,7 @@ async function importPdf(file) {
 
 // ============ キーワード ============
 function keywords() {
-  return scoreKeywords(keywordSources(report(), state.blogs), 80);
+  return scoreKeywords(keywordSources(report(), state.blogs, state.rakko), 80);
 }
 
 function selBar(where) {
@@ -265,17 +266,65 @@ function selBar(where) {
 function renderKw() {
   const el = $("#view-kw");
   const all = keywords();
-  const filters = [["all", "すべて"], ["スタイル閲覧", "スタイル閲覧"], ["ブックマーク", "ブックマーク"], ["クーポン予約", "クーポン予約"], ["ブログ題名", "ブログ題名"]];
+  const filters = [["all", "すべて"], ["ラッコ", "検索（ラッコ）"], ["スタイル閲覧", "スタイル閲覧"], ["ブックマーク", "ブックマーク"], ["クーポン予約", "クーポン予約"], ["ブログ題名", "ブログ題名"]];
+  // レポートやブログでも人気で、検索もされている言葉
+  const both = state.rakko ? all.filter((k) => k.from.includes("ラッコ") && k.from.length > 1) : [];
+  const chip = (k) => `<button class="chip ${state.selKw.includes(k.word) ? "on" : ""}" data-kw="${esc(k.word)}">${esc(k.word)}<span class="sc">${k.score}</span>${k.from.includes("ラッコ") ? `<span class="tag">検索</span>` : ""}</button>`;
   const list = state.kwFilter === "all" ? all : all.filter((k) => k.from.includes(state.kwFilter));
   const r = report();
   el.innerHTML = `
     ${selBar("kw")}
+    ${rakkoCard(all)}
+    ${both.length ? `<h2>検索でも人気の言葉</h2>
+      <p class="small muted">レポート・ブログで人気があり、ラッコキーワードでも検索されている言葉です。まず使いたい候補です。</p>
+      <div class="chips">${both.map(chip).join("")}</div>` : ""}
     <h2>よく見られている言葉</h2>
     <p class="small muted">${r ? `レポート（${esc(r.issue)}月号）の閲覧数・ブックマーク・予約数` : "レポート未読み込みのため、ブログの題名だけ"}から点数をつけています。数字が大きいほど、よく見られている言葉です。</p>
     <div class="seg">${filters.map(([k, l]) => `<button data-kwf="${esc(k)}" class="${k === state.kwFilter ? "on" : ""}">${l}</button>`).join("")}</div>
-    <div class="chips">${list.length ? list.map((k) =>
-      `<button class="chip ${state.selKw.includes(k.word) ? "on" : ""}" data-kw="${esc(k.word)}">${esc(k.word)}<span class="sc">${k.score}</span></button>`).join("") :
+    <div class="chips">${list.length ? list.map(chip).join("") :
       `<p class="muted">まだ言葉がありません。ランキングタブでレポートを読み込んでください。</p>`}</div>`;
+}
+
+// ラッコキーワード：調べる → 一覧をコピー → 貼り付けて取り込む
+const RAKKO_URL = "https://rakkokeyword.com/result/suggest?q=";
+function rakkoCard(all) {
+  const area = "池袋";
+  const seeds = [`${area} メンズ`, ...all.filter((k) => !k.from.includes("ラッコ")).slice(0, 5).map((k) => `${area} ${k.word}`)];
+  const rk = state.rakko;
+  const phrases = rk ? [...rk.items].sort((a, b) => (b.vol || 0) - (a.vol || 0)).slice(0, 20) : [];
+  return `
+    <div class="card">
+      <h3>ラッコキーワードで、検索されている言葉を調べる</h3>
+      <p class="small muted" style="margin-top:0">① 下の言葉をタップ → ラッコキーワードが開きます　② 出てきた一覧をコピー　③ 戻って「貼り付けて取り込む」</p>
+      <div class="chips">${seeds.map((q) => `<button class="chip" data-rakko="${esc(q)}">${esc(q)} ↗</button>`).join("")}</div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="rakkoQ" class="grow" placeholder="自分で入れる（例：池袋 黒髪）" enterkeyhint="go">
+        <button class="btn sm" data-act="rakkoGo">調べる</button>
+      </div>
+      <textarea id="rakkoPaste" style="margin-top:10px" placeholder="ラッコキーワードでコピーした一覧を、ここに貼り付け"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" data-act="rakkoClip">コピーした一覧を貼り付け</button>
+        <button class="btn sm primary" data-act="rakkoIn">取り込む</button>
+        ${rk ? `<button class="btn sm" data-act="rakkoDel">取り込んだ分を消す</button>` : ""}
+      </div>
+      ${rk ? `<p class="small muted">取り込み済み：${rk.items.length}件（${esc(rk.updated)}）。点数に「検索」として加わっています。</p>
+        <details class="post"><summary class="small">検索されている言葉の組み合わせ（ブログの題名のヒント）▾</summary>
+          <div class="chips" style="margin-top:6px">${phrases.map((p) =>
+            `<button class="chip ${state.selKw.includes(p.kw) ? "on" : ""}" data-kw="${esc(p.kw)}">${esc(p.kw)}${p.vol ? `<span class="sc">${fmt(p.vol)}</span>` : ""}</button>`).join("")}</div>
+        </details>` : ""}
+    </div>`;
+}
+
+function importRakko(text) {
+  const items = parseRakko(text);
+  if (!items.length) { toast("言葉が見つかりませんでした。ラッコキーワードの一覧をそのまま貼り付けてください"); return; }
+  // 前に取り込んだ分と合わせる（同じ言葉は新しい方を使う）
+  const map = new Map((state.rakko?.items || []).map((i) => [i.kw, i]));
+  for (const i of items) map.set(i.kw, i);
+  state.rakko = { updated: new Date().toLocaleDateString("ja-JP"), items: [...map.values()].slice(-500) };
+  store.set("rakko", state.rakko);
+  toast(`${items.length}件の言葉を取り込みました`);
+  renderKw();
 }
 
 // ============ スタイル ============
@@ -529,6 +578,7 @@ document.addEventListener("click", async (ev) => {
   }
   if (d.unsel) { setKw(state.selKw.filter((w) => w !== d.unsel)); return renders[state.view](); }
   if (d.staff) { state.staffId = d.staff; store.set("staff", d.staff); return renderBlog(); }
+  if (d.rakko) { window.open(RAKKO_URL + encodeURIComponent(d.rakko), "_blank"); return; }
   if (d.aiapp) { state.aiApp = d.aiapp; store.set("aiApp", d.aiapp); return renders[state.view](); }
   if (d.blen) { state.blogLen = d.blen; store.set("blogLen", d.blen); return renderBlog(); }
   if (d.tag) return copy(d.tag, `「${d.tag}」をコピーしました`);
@@ -561,6 +611,23 @@ document.addEventListener("click", async (ev) => {
       toast("お願い文をコピーしました。AIアプリで貼り付けて送ってください");
       break;
     }
+    case "rakkoGo": {
+      const q = $("#rakkoQ").value.trim();
+      if (q) window.open(RAKKO_URL + encodeURIComponent(q), "_blank");
+      break;
+    }
+    case "rakkoClip": {
+      try {
+        const t = await navigator.clipboard.readText();
+        $("#rakkoPaste").value = t;
+        if (t.trim()) importRakko(t);
+      } catch { toast("貼り付けできませんでした。上の欄を長押しして「ペースト」してください"); }
+      break;
+    }
+    case "rakkoIn": importRakko($("#rakkoPaste").value); break;
+    case "rakkoDel":
+      if (confirm("取り込んだラッコキーワードの一覧を消しますか？")) { state.rakko = null; store.del("rakko"); renderKw(); }
+      break;
     case "promptOnly": copy(promptFor(d.kind), "お願い文をコピーしました"); break;
     case "pasteClip": {
       try {
