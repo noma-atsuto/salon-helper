@@ -196,3 +196,7 @@ label.check input { width: 18px; height: 18px; margin-top: 1px; flex-shrink: 0; 
 .chip .tag { font-size: 10px; padding: 1px 5px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); }
 .chip.on .tag { background: rgb(255 255 255 / 25%); color: inherit; }
 details.card > summary { cursor: pointer; font-size: 14px; }
+.return-bar { border: 2px solid var(--accent); background: var(--accent-soft); }
+.pulse { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 50% { box-shadow: 0 0 0 8px transparent; } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }

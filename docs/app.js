@@ -312,7 +312,15 @@ function renderKw() {
   const chip = (k) => `<button class="chip ${state.selKw.includes(k.word) ? "on" : ""}" data-kw="${esc(k.word)}">${esc(k.word)}<span class="sc">${k.score}</span>${k.from.includes("ラッコ") ? `<span class="tag">検索</span>` : ""}</button>`;
   const list = state.kwFilter === "all" ? all : all.filter((k) => k.from.includes(state.kwFilter));
   const r = report();
+  const pend = rakkoPending();
   el.innerHTML = `
+    ${pend ? `
+      <div class="card return-bar">
+        <p style="margin:0 0 8px"><b>「${esc(pend.q)}」の一覧をコピーできましたか？</b><br>
+          <span class="small">ラッコキーワードで一覧をコピーしたら、下のボタンを押すだけで取り込めます。</span></p>
+        <button class="btn primary block pulse" data-act="rakkoClip">コピーした一覧を貼り付けて取り込む</button>
+        <div class="row end" style="margin-top:6px"><button class="btn sm" data-act="rakkoDismiss">今回はやめる</button></div>
+      </div>` : ""}
     ${selBar("kw")}
     ${rakkoCard(all)}
     ${both.length ? `<h2>検索でも人気の言葉</h2>
@@ -355,6 +363,17 @@ function rakkoCard(all) {
     </div>`;
 }
 
+// ラッコキーワードを開いてから30分のあいだは「戻ってきたら貼り付け」の案内を出す
+function openRakko(q) {
+  window.open(RAKKO_URL + encodeURIComponent(q), "_blank");
+  store.set("rakkoPending", { q, at: Date.now() });
+  renderKw();
+}
+function rakkoPending() {
+  const p = store.get("rakkoPending", null);
+  return p && Date.now() - p.at < 30 * 60 * 1000 ? p : null;
+}
+
 function importRakko(text) {
   const items = parseRakko(text);
   if (!items.length) { toast("言葉が見つかりませんでした。ラッコキーワードの一覧をそのまま貼り付けてください"); return; }
@@ -363,6 +382,7 @@ function importRakko(text) {
   for (const i of items) map.set(i.kw, i);
   state.rakko = { updated: new Date().toLocaleDateString("ja-JP"), items: [...map.values()].slice(-500) };
   store.set("rakko", state.rakko);
+  store.del("rakkoPending");
   toast(`${items.length}件の言葉を取り込みました`);
   renderKw();
 }
@@ -649,7 +669,7 @@ document.addEventListener("click", async (ev) => {
   }
   if (d.unsel) { setKw(state.selKw.filter((w) => w !== d.unsel)); return renders[state.view](); }
   if (d.staff) { state.staffId = d.staff; store.set("staff", d.staff); return renderBlog(); }
-  if (d.rakko) { window.open(RAKKO_URL + encodeURIComponent(d.rakko), "_blank"); return; }
+  if (d.rakko) { openRakko(d.rakko); return; }
   if (d.gen) { $("#" + d.gen).value = randomPass(); return; }
   if (d.aiapp) { state.aiApp = d.aiapp; store.set("aiApp", d.aiapp); return renders[state.view](); }
   if (d.blen) { state.blogLen = d.blen; store.set("blogLen", d.blen); return renderBlog(); }
@@ -685,7 +705,7 @@ document.addEventListener("click", async (ev) => {
     }
     case "rakkoGo": {
       const q = $("#rakkoQ").value.trim();
-      if (q) window.open(RAKKO_URL + encodeURIComponent(q), "_blank");
+      if (q) openRakko(q);
       break;
     }
     case "rakkoClip": {
@@ -693,9 +713,10 @@ document.addEventListener("click", async (ev) => {
         const t = await navigator.clipboard.readText();
         $("#rakkoPaste").value = t;
         if (t.trim()) importRakko(t);
-      } catch { toast("貼り付けできませんでした。上の欄を長押しして「ペースト」してください"); }
+      } catch { toast("貼り付けできませんでした。「ラッコキーワードで調べる」の欄を長押しして「ペースト」してください"); }
       break;
     }
+    case "rakkoDismiss": store.del("rakkoPending"); renderKw(); break;
     case "rakkoIn": importRakko($("#rakkoPaste").value); break;
     case "rakkoDel":
       if (confirm("取り込んだラッコキーワードの一覧を消しますか？")) { state.rakko = null; store.del("rakko"); renderKw(); }
@@ -788,6 +809,13 @@ document.addEventListener("keydown", (ev) => {
     ev.preventDefault();
     document.querySelector(`[data-act="kwAdd"][data-where="${ev.target.id.slice(6)}"]`)?.click();
   }
+});
+
+// ラッコキーワードから戻ってきたら、キーワードタブの一番上に「貼り付け」の案内を出す
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !rakkoPending()) return;
+  if (state.view !== "kw") go("kw");
+  else { renderKw(); window.scrollTo(0, 0); }
 });
 
 // ============ はじめ ============
