@@ -334,16 +334,17 @@ function renderKw() {
 }
 
 // ラッコキーワード：調べる → 一覧をコピー → 貼り付けて取り込む
-const RAKKO_URL = "https://rakkokeyword.com/result/suggest?q=";
+const RAKKO_URL = "https://rakkokeyword.com/result/suggestKeywords?q=";
 function rakkoCard(all) {
   const area = "池袋";
-  const seeds = [`${area} メンズ`, ...all.filter((k) => !k.from.includes("ラッコ")).slice(0, 5).map((k) => `${area} ${k.word}`)];
+  const seeds = [`${area} メンズ 美容室`, `${area} メンズカット`, ...all.filter((k) => !k.from.includes("ラッコ")).slice(0, 4).map((k) => `${area} ${k.word}`)];
   const rk = state.rakko;
   const phrases = rk ? [...rk.items].sort((a, b) => (b.vol || 0) - (a.vol || 0)).slice(0, 20) : [];
   return `
     <div class="card">
       <h3>ラッコキーワードで、検索されている言葉を調べる</h3>
       <p class="small muted" style="margin-top:0">① 下の言葉をタップ → ラッコキーワードが開きます　② 出てきた一覧をコピー　③ 戻って「貼り付けて取り込む」</p>
+      <p class="small muted">※一覧の「コピー」ボタンは、ラッコキーワードに無料登録（メールアドレスのみ）すると使えます。登録しない場合は、一覧の部分を長押しで選んでコピーしてください。服・飲食店など髪に関係ない言葉や、広告の文は自動で取り除きます。</p>
       <div class="chips">${seeds.map((q) => `<button class="chip" data-rakko="${esc(q)}">${esc(q)} ↗</button>`).join("")}</div>
       <div class="row" style="margin-top:8px">
         <input type="text" id="rakkoQ" class="grow" placeholder="自分で入れる（例：池袋 黒髪）" enterkeyhint="go">
@@ -357,6 +358,7 @@ function rakkoCard(all) {
       </div>
       ${rk ? `<p class="small muted">取り込み済み：${rk.items.length}件（${esc(rk.updated)}）。点数に「検索」として加わっています。</p>
         <details class="post"><summary class="small">検索されている言葉の組み合わせ（ブログの題名のヒント）▾</summary>
+          <p class="small muted" style="margin:6px 0 0">ほかのお店の名前が入った組み合わせもあります。そのまま題名や文章には使わないでください。</p>
           <div class="chips" style="margin-top:6px">${phrases.map((p) =>
             `<button class="chip ${state.selKw.includes(p.kw) ? "on" : ""}" data-kw="${esc(p.kw)}">${esc(p.kw)}${p.vol ? `<span class="sc">${fmt(p.vol)}</span>` : ""}</button>`).join("")}</div>
         </details>` : ""}
@@ -375,15 +377,15 @@ function rakkoPending() {
 }
 
 function importRakko(text) {
-  const items = parseRakko(text);
-  if (!items.length) { toast("言葉が見つかりませんでした。ラッコキーワードの一覧をそのまま貼り付けてください"); return; }
+  const { items, dropped } = parseRakko(text);
+  if (!items.length) { toast(dropped ? `髪に関係する言葉が見つかりませんでした（関係ない言葉${dropped}件は除きました）` : "言葉が見つかりませんでした。ラッコキーワードの一覧をそのまま貼り付けてください"); return; }
   // 前に取り込んだ分と合わせる（同じ言葉は新しい方を使う）
   const map = new Map((state.rakko?.items || []).map((i) => [i.kw, i]));
   for (const i of items) map.set(i.kw, i);
   state.rakko = { updated: new Date().toLocaleDateString("ja-JP"), items: [...map.values()].slice(-500) };
   store.set("rakko", state.rakko);
   store.del("rakkoPending");
-  toast(`${items.length}件の言葉を取り込みました`);
+  toast(`${items.length}件の言葉を取り込みました${dropped ? `（髪に関係ない${dropped}件は除きました）` : ""}`);
   renderKw();
 }
 

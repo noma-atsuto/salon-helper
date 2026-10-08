@@ -44,9 +44,17 @@ function tokens(text) {
 }
 
 // 1つの文から拾える言葉（長い言葉に含まれる短い言葉は重ねて数えない）
-function wordsIn(text, dictOnly) {
-  const found = new Set(dictOnly ? [] : tokens(text));
-  const hits = TERMS.filter((t) => text.includes(t));
+// 検索で一緒に使われる「探し方」の言葉（ラッコキーワードの結果から拾う）
+const INTENT = ["おすすめ", "安い", "上手い", "人気", "得意", "専門", "当日", "今日", "学割", "学生", "個室", "似合わせ",
+  "ランキング", "高評価", "夜", "予約", "20代", "30代", "40代", "50代", "白髪染め", "ヘッドスパ", "眉カット", "眉毛",
+  "ヘアセット", "ウルフカット", "ツイストパーマ", "ダウンパーマ", "縮毛", "散髪", "床屋", "理容室", "バーバー"];
+
+// vocab = "dict" のときは一覧の言葉だけ、"intent" のときは一覧＋探し方の言葉だけを拾う（ほかのお店の名前などを拾わないため）
+function wordsIn(text, vocab) {
+  const found = new Set(vocab ? [] : tokens(text));
+  const list = vocab === "intent" ? [...TERMS, ...INTENT] : TERMS;
+  const flat = text.replace(/\s+/g, "");
+  const hits = list.filter((t) => text.includes(t) || flat.includes(t));
   for (const t of hits) {
     if (!hits.some((u) => u !== t && u.includes(t))) found.add(t);
   }
@@ -62,7 +70,7 @@ export function scoreKeywords(sources, limit = 60) {
     for (const it of src.items) {
       const pts = ((it.value || 0) / max) * 100 * (src.weight ?? 1);
       if (pts <= 0) continue;
-      for (const w of wordsIn(it.text, src.dictOnly)) {
+      for (const w of wordsIn(it.text, src.vocab)) {
         const e = map.get(w) || { word: w, score: 0, from: new Set() };
         e.score += pts;
         e.from.add(src.label);
@@ -97,27 +105,42 @@ export function keywordSources(report, blogs, rakko) {
     const vols = rakko.items.map((r) => r.vol).filter((v) => v > 0);
     const fill = vols.length ? Math.min(...vols) : 1;
     // 検索回数が分からない一覧は、1つ20点にとどめる
-    out.push({ label: "ラッコ", weight: vols.length ? 1 : 0.2, items: rakko.items.map((r) => ({ text: r.kw, value: r.vol || fill })) });
+    out.push({ label: "ラッコ", vocab: "intent", weight: vols.length ? 1 : 0.2, items: rakko.items.map((r) => ({ text: r.kw, value: r.vol || fill })) });
   }
   return out;
 }
 
+// 髪・美容室に関係する言葉かどうか（ラッコキーワードの結果には、服・アクセサリー・飲食店なども混ざるため）
+const HAIR = [...TERMS, "美容室", "美容院", "ヘア", "髪", "カット", "パーマ", "カラー", "スパ", "眉", "縮毛", "トリートメント",
+  "理容", "床屋", "バーバー", "barber", "サロン", "ブリーチ", "白髪", "刈り上げ", "坊主", "スタイリスト", "ホットペッパー"];
+const NOT_HAIR = /コンカフェ|エステ|脱毛|求人|バイト|体入|ファッション|アクセサリー|服|ネイル|まつ|クリニック|通販|パンツ|バッグ|リュック|マッサージ|丁目|サイト/;
+export const isHairWord = (kw) => HAIR.some((h) => kw.toLowerCase().includes(h.toLowerCase())) && !NOT_HAIR.test(kw);
+
+// ラッコキーワードの画面の見出し・ボタンなど（言葉の一覧ではない文字）
+const UI_WORDS = /^(キーワード|区分|指定なし|SEO難易度|月間検索数|CPC|CPC（\$）|競合性|出現時期|深掘調査|単語数|再検索|一括取得|キーワード増量|データ出力|使い方|（使い方）|料金プラン|もっと見る|広告|ログイン|無料で始める|\?|\d+HIT)$/;
+
 // ラッコキーワードからコピーした一覧を読む。
 // 1行に1つの言葉。表（CSV・タブ区切り）なら、数字の列を「検索回数」とみなす。
+// 画面をまるごとコピーした場合も、髪に関係する言葉だけを残す。
 export function parseRakko(text) {
   const items = [];
   const seen = new Set();
+  let dropped = 0;
   for (const raw of String(text).split(/\r?\n/)) {
     // タブ区切りならタブだけで分ける（「1,300」のような数字のカンマで分けないため）
-    const cells = (raw.includes("\t") ? raw.split("\t") : raw.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)).map((c) => c.replace(/^"|"$/g, "").trim()).filter(Boolean);
+    const cells = (raw.includes("\t") ? raw.split("\t") : raw.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/))
+      .map((c) => c.replace(/^"|"$/g, "").trim())
+      .filter((c) => c && !/^[＋+αΑ\s]+$/.test(c)); // 「＋＋」などの区分の印は捨てる
     if (!cells.length) continue;
-    const kw = cells.find((c) => !/^[\d,.\-–%]+$/.test(c) && !/^(No\.?|#)?\d+[.)．]?$/.test(c));
-    if (!kw || kw.length > 40 || /キーワード|検索ボリューム|月間|CPC|SEO難易度|^順位$/.test(kw)) continue;
-    const clean = kw.replace(/^\d+[.)．]\s*/, "").replace(/\s+/g, " ").trim();
+    const kw = cells.find((c) => !/^[\d,.\-–%$（）()]+$/.test(c) && !/^(No\.?|#)?\d+[.)．]?$/.test(c));
+    if (!kw || kw.length > 40 || UI_WORDS.test(kw) || /検索ボリューム|月間検索|SEO難易度|\.(jp|com|net)\b|円）|https?:/.test(kw)) continue;
+    const clean = kw.replace(/^\d+[.)．]\s*/, "").replace(/[\s　]+/g, " ").trim();
     if (!clean || seen.has(clean)) continue;
     seen.add(clean);
+    // 髪に関係ない言葉と、英字の名前（ほかのお店の名前であることが多い）は除く
+    if (!isHairWord(clean) || /[A-Za-z]{3,}/.test(clean.replace(/men'?s/gi, ""))) { dropped++; continue; }
     const volCell = cells.find((c) => c !== kw && /^[\d,]+$/.test(c));
     items.push({ kw: clean, vol: volCell ? parseInt(volCell.replace(/,/g, ""), 10) : null });
   }
-  return items;
+  return { items, dropped };
 }
