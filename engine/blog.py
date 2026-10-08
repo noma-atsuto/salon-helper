@@ -155,8 +155,10 @@ def run():
             new_count += 1
         result.append(entry)
 
+    # 中身が前回と同じなら更新日時も変えない（毎日むだな保存をしないため）
+    same = old.get("staff") == result
     data = {
-        "updated": datetime.now(JST).strftime("%Y-%m-%d %H:%M"),
+        "updated": old.get("updated") if same and old.get("updated") else datetime.now(JST).strftime("%Y-%m-%d %H:%M"),
         "salon": {"id": config.SALON_ID, "name": config.SALON_NAME, "url": config.BASE_URL},
         "staff": result,
     }
